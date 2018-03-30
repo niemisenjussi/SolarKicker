@@ -95,7 +95,7 @@ uint16_t GetRAWVoltage(uint8_t Channel, uint8_t ADCRange);
 float GetVoltage(uint8_t Channel, uint8_t ADCRange, uint8_t numofsamples);
 
 //PWM stuff
-void initPWM(uint8_t pwmvalue1, uint8_t pwmvalue2, uint8_t pwmvalue3);
+//void initPWM(uint8_t pwmvalue1, uint8_t pwmvalue2, uint8_t pwmvalue3);
 void shutdownPWM(uint8_t channel);
 void decreasePWM(uint8_t step);
 void increasePWM(uint8_t step);
@@ -129,6 +129,8 @@ void initCommonPorts(void);
 float readTemperature(void);
 void initTimer(void);
     
+void setPWM(uint8_t channel, uint8_t pwm);
+
 //UI stuff
 void printMenu(void);
 
@@ -221,6 +223,15 @@ uint8_t _cfgbyte;
 uint8_t _PGA;
 uint8_t _buffer[5] = {0,0,0,0,0};
 
+#define UP 1
+#define DOWN 2
+#define MPPT_STEPS 5
+
+uint16_t pwm_master = 0;
+uint8_t mppt_dir = 0;
+uint8_t mppt_step = 0;
+uint8_t mppt_high = 0;
+float mppt_peak_power = 0;
 
 void MCP3424_SetConfig(unsigned char channel, unsigned char resolution, unsigned char gain){
     unsigned char PGAgain = 0;
@@ -384,6 +395,76 @@ void generalCallLatch(void){
     i2c_stop();
 }
 
+void adjust_PWM(int8_t amount){
+    uint8_t pwm1 = 0;
+    uint8_t pwm2 = 0;
+    uint8_t pwm3 = 0;
+    if (pwm_master + amount < 0){
+        pwm_master = 0;
+    }
+    else if (pwm_master + amount > 768){
+        pwm_master = 768;
+    }
+
+    if (pwm_master > 512){
+        pwm1 = 0xFF;
+        pwm2 = 0xFF;
+        pwm3 = pwm_master - 512;
+    }
+    else if (pwm_master > 256){
+        pwm1 = 0xFF;
+        pwm2 = pwm_master - 256;
+        pwm3 = 0x00;
+    }
+    else{
+        pwm1 = pwm_master;
+        pwm2 = 0x00;
+        pwm3 = 0x00;
+    }
+    setPWM(1, pwm1);
+    setPWM(2, pwm2);
+    setPWM(3, pwm3);
+}
+
+/*
+    uint16_t pwm_master = 0;
+    uint8_t mppt_dir = 0;
+    uint8_t mppt_step = 0;
+    uint8_t mppt_high = 0;
+    float mppt_peak_power = 0;
+*/
+
+void mppt_control(float current_power){
+    if (mppt_dir == UP){ //Climing uphill
+        adjust_PWM(5);
+        if (mppt_step < MPPT_STEPS){ //Track maximum power point, n.sample window
+            if (current_power > mppt_peak_power){
+                mppt_step = 0; //Reset points if higher point detected, idea is to find highest point
+            }
+            mppt_step ++;
+        }
+        else{ //All samples collected, do adjustment
+            mppt_dir = DOWN; //
+            mppt_step = 0;
+            mppt_peak_power = current_power; //set new maxpoint to current poin;
+        }
+    }
+    else{ //Going Downhill
+        adjust_PWM(-5);
+        if (mppt_step < MPPT_STEPS){
+            if (current_power > mppt_peak_power){
+                mppt_step = 0;
+            }
+            mppt_step ++;
+        }
+        else{ //We have found maximum point and enough off 
+            mppt_dir = UP;
+            mppt_step = 0;
+            mppt_peak_power = current_power; //set new maxpoint to current point
+        }
+    }
+}
+
 int main (int argc, char *argv[])
 {
     _delay_ms(500);
@@ -396,9 +477,9 @@ int main (int argc, char *argv[])
     //
     
     //_delay_ms(2000);
-    shutdownPWM(1);
-    shutdownPWM(2);
-    shutdownPWM(3);
+    //shutdownPWM(1);
+    //shutdownPWM(2);
+    //shutdownPWM(3);
     
     ASSR = 0x20; //Enable async mode Timer 2 Ext oscillator
     TCNT2 = 0;
@@ -406,6 +487,9 @@ int main (int argc, char *argv[])
     
     //AVCC = 4.52V
     
+    setPWM(1,0);
+    setPWM(2,0);
+    setPWM(3,0);
     GTCCR = 0x00; 
     
     fprintf_P(&serial_port0, PSTR("AVCC Voltage:"));
@@ -459,23 +543,30 @@ int main (int argc, char *argv[])
     
     
     
-    initPWM(10,0,0);
-    shutdownPWM(2);
-    shutdownPWM(3);
+    //initPWM(0,0,0);
+    //shutdownPWM(1);
+    //shutdownPWM(3);
     
     uint8_t ch = 2;
     uint16_t voltoffset = 3605;
     
     //MCP3424_SetConfig(ch,18,1);
-    while(1){     
+
+    uint8_t pwmstate = 1;
+    uint8_t round = 0;
+    uint8_t dir = 0;
+    float lastpower = 0;
+    float power = 0;
+    while(1){
+        //initPWM(pwm1, pwm2, pwm3);
         if (command_received == 1){
             parseCommands();
             command_received = 0;
         }
         //Start conversion (without ROM matching)
-		ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 3 ), NULL );
-        ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 4 ), NULL );
-        ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 5 ), NULL );
+		//ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 3 ), NULL );
+       // ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 4 ), NULL );
+       // ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 5 ), NULL );
 
 		//Delay (sensor needs time to perform conversion)
 		
@@ -496,7 +587,13 @@ int main (int argc, char *argv[])
         //}
         float measuredCurrent = (Current)/1.385; //4092000L/262143L*Voltage;
         
-        fprintf(&serial_port0, "VoltageRAW:%.2f Voltage:%.2fV CurrentRAW:%.2f Current:%.2fmA\n",rawvolt, measuredVoltage, Current, measuredCurrent);
+        power = measuredVoltage * (measuredCurrent/1000);
+        //uint16_t pwm1 = (pwm&0xFF0000)>>16;
+        //uint16_t pwm2 = ((pwm&0x00FF00)>>8);
+        //uint16_t pwm3 = pwm&0xFF;
+        fprintf(&serial_port0, "Voltage:%.2fV Current:%.2fmA Power:%.2fW PWM1:%d PWM2:%d PWM3:%d\n",measuredVoltage, measuredCurrent, power, pwm_master);
+        
+        mppt_control(power);
         
         // 16.253V 1.67 Ohm 1A
         // VoltageRAW = 12448, Voltage 194350  => vähennetään offset 12448 - 3605 = 8843
@@ -530,6 +627,7 @@ int main (int argc, char *argv[])
         //if (ch > 4){
         //    ch = 1;   
         //}
+        /*
         int16_t temp = 0;
         int16_t temp2 = 0;
         int16_t temp3 = 0;
@@ -546,6 +644,7 @@ int main (int argc, char *argv[])
         float temp_calc3 = temp3;
         temp_calc3 /= 20.0;
        // fprintf(&serial_port0, "TEMP:%.2f TEMP2:%.2f TEMP3:%.2f\n",temp_calc, temp_calc2, temp_calc3);
+        */
     }
     
     //Internal 1.1V => 1.0-1.2V 
@@ -663,7 +762,7 @@ void parseCommands(void){
     ring_read = ring_write; //Reset Ring buffer
     fprintf(&serial_port0, "Readed value:%f\n",value);
     uint8_t pwm = value;
-    initPWM(pwm, pwm, pwm);
+    //initPWM(pwm, pwm, pwm);
 }
 
 /*
@@ -688,7 +787,7 @@ void printMenu(void){
     fprintf(&serial_port0, "%d mV\n",AVCC_VOLTAGE);
 }
 
-
+/*
 void initPWM(uint8_t pwmvalue1, uint8_t pwmvalue2, uint8_t pwmvalue3){
     TCCR0A = (0xA0 + 0x03); //A + B channels FAST PWM, UPDATE OCR0 at TOP
     DDRB |= (1<<PB4);
@@ -709,23 +808,71 @@ void initPWM(uint8_t pwmvalue1, uint8_t pwmvalue2, uint8_t pwmvalue3){
     // 16.169V 1.67 Ohm
     // 9.682035928 A 100% duty cycle
     // 0.09765625 × 9.682035928 = 0.9455A 
+}*/
+
+void setPWM(uint8_t channel, uint8_t pwm){
+    if (channel == 1){
+        if (pwm == 0){
+            TCCR0A &= ~(1<<7); //Channel A disable
+            DDRB &= ~(1<<PB3);
+            PORTB &= ~(1<<PB3);
+            OCR0A = 0;
+        }
+        else{
+            TCCR0A |= (0x80 + 0x03);
+            OCR0A = pwm;
+            DDRB |= (1<<PB3);
+            PORTB &= ~(1<<PB3);
+            TCCR0B = 0x01; //Set 1 divider
+        }
+    }
+    else if (channel == 2){
+        if (pwm == 0){
+            TCCR0A &= ~(1<<6); //Channel B disable
+            DDRB &= ~(1<<PB4);
+            PORTB &= ~(1<<PB4);
+            OCR0B = 0;
+        }
+        else{
+            TCCR0A |= (0x40 + 0x03);
+            DDRB |= (1<<PB4);
+            PORTB &= ~(1<<PB4); 
+            OCR0B = pwm;
+            TCCR0B = 0x01; //Set 1 divider
+        }
+    }
+    else if (channel == 3){
+        if (pwm == 0){
+            TCCR1A &= ~(1<<7); //Channel B disable
+            DDRD &= ~(1<<PB5);
+            PORTD &= ~(1<<PB5);
+            OCR1AL = 0;  
+        }
+        else{
+            OCR1AL = pwm;
+            TCCR1A = (0x80 + 0x01); //A channel only, 8-bit mode
+            DDRD |= (1<<PD5);
+            PORTD &= ~(1<<PD5);
+            TCCR1B = 0x01 + 0x08; //Set 1 divider
+        }
+    }
 }
 
 void shutdownPWM(uint8_t channel){
     if (channel == 1){
-        TCCR0A &= ~(1<<0x80); //Channel A disable
+        TCCR0A &= ~(1<<7); //Channel A disable
         DDRB &= ~(1<<PB3);
         PORTB &= ~(1<<PB3);
         OCR0A = 0;
     }
     else if (channel == 2){
-        TCCR0A &= ~(1<<0x40); //Channel B disable
+        TCCR0A &= ~(1<<6); //Channel B disable
         DDRB &= ~(1<<PB4);
         PORTB &= ~(1<<PB4);
         OCR0B = 0;
     }
     else if (channel == 3){
-        TCCR1A &= ~(1<<0x80); //Channel B disable
+        TCCR1A &= ~(1<<7); //Channel B disable
         DDRD &= ~(1<<PB5);
         PORTD &= ~(1<<PB5);
         OCR1AL = 0;
@@ -756,7 +903,7 @@ void decreasePWM(uint8_t step){
 
 void setDAC_PWM(uint8_t value){
     if (pwm_init_done == 0){
-        initPWM(value,value,value);
+        //initPWM(value,value,value);
     }
     else{
         PWM_OCRA = value; //Init PWM to zero    
