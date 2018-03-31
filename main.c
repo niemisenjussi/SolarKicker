@@ -95,7 +95,7 @@ uint16_t GetRAWVoltage(uint8_t Channel, uint8_t ADCRange);
 float GetVoltage(uint8_t Channel, uint8_t ADCRange, uint8_t numofsamples);
 
 //PWM stuff
-//void initPWM(uint8_t pwmvalue1, uint8_t pwmvalue2, uint8_t pwmvalue3);
+void initPWM(uint8_t pwmvalue1, uint8_t pwmvalue2, uint8_t pwmvalue3);
 void shutdownPWM(uint8_t channel);
 void decreasePWM(uint8_t step);
 void increasePWM(uint8_t step);
@@ -125,7 +125,7 @@ void read_until_line_end(void);
 void parseCommands(void);
 
 //Common functions
-void initCommonPorts(void);
+//void initCommonPorts(void);
 float readTemperature(void);
 void initTimer(void);
     
@@ -225,13 +225,17 @@ uint8_t _buffer[5] = {0,0,0,0,0};
 
 #define UP 1
 #define DOWN 2
-#define MPPT_STEPS 5
+#define MPPT_STEPS_1 4
+#define MPPT_STEPS_2 8
+#define MPPT_STEPS_3 16
+#define MIN_PWM 10 //minimum pulse width max 256
 
-uint16_t pwm_master = 0;
-uint8_t mppt_dir = 0;
-uint8_t mppt_step = 0;
-uint8_t mppt_high = 0;
-float mppt_peak_power = 0;
+uint8_t mppt_steps[3] = {MPPT_STEPS_1, MPPT_STEPS_2, MPPT_STEPS_3};
+volatile int16_t pwm_master = 20;
+volatile uint8_t mppt_dir = UP;
+volatile uint8_t mppt_step = 0;
+volatile uint8_t mppt_high = 0;
+volatile float mppt_peak_power = 0;
 
 void MCP3424_SetConfig(unsigned char channel, unsigned char resolution, unsigned char gain){
     unsigned char PGAgain = 0;
@@ -399,28 +403,38 @@ void adjust_PWM(int8_t amount){
     uint8_t pwm1 = 0;
     uint8_t pwm2 = 0;
     uint8_t pwm3 = 0;
-    if (pwm_master + amount < 0){
+    if ((pwm_master + amount) < 0){
         pwm_master = 0;
     }
-    else if (pwm_master + amount > 768){
-        pwm_master = 768;
+    else if ((pwm_master + amount) > 0x2FD){
+        pwm_master = 0x2FD;
+    }
+    else{ 
+        pwm_master += amount;
     }
 
-    if (pwm_master > 512){
+    if (pwm_master >= 0x1FE){ //over 512
         pwm1 = 0xFF;
         pwm2 = 0xFF;
-        pwm3 = pwm_master - 512;
+        pwm3 = pwm_master - 0x1FE; //minus 512
+        if (pwm3 < MIN_PWM){
+            pwm3 = MIN_PWM;
+        }
     }
-    else if (pwm_master > 256){
+    else if (pwm_master >= 0xFF){
         pwm1 = 0xFF;
-        pwm2 = pwm_master - 256;
+        pwm2 = pwm_master - 0xFF;
         pwm3 = 0x00;
+        if (pwm2 < MIN_PWM){
+            pwm2 = MIN_PWM;
+        }
     }
     else{
         pwm1 = pwm_master;
         pwm2 = 0x00;
         pwm3 = 0x00;
     }
+    //fprintf(&serial_port0, "PWM1:%d, PWM2:%d, PWM3:%d\n", pwm1, pwm2, pwm3);
     setPWM(1, pwm1);
     setPWM(2, pwm2);
     setPWM(3, pwm3);
@@ -435,11 +449,24 @@ void adjust_PWM(int8_t amount){
 */
 
 void mppt_control(float current_power){
+    uint8_t mppt_step_lookup = 0;
+    if (pwm_master >= 0xFF){
+        mppt_step_lookup = 2;
+    }
+    else if (pwm_master >= 0x40){
+        mppt_step_lookup = 1;
+    }
+    else{
+        mppt_step_lookup = 0;
+    }
+
     if (mppt_dir == UP){ //Climing uphill
-        adjust_PWM(5);
-        if (mppt_step < MPPT_STEPS){ //Track maximum power point, n.sample window
+       // fprintf(&serial_port0,"Uphill CP:%.2f mppt:%.2f\n", current_power, mppt_peak_power);
+        adjust_PWM(1);
+        if (mppt_step < mppt_steps[mppt_step_lookup] ){ //Track maximum power point, n.sample window
             if (current_power > mppt_peak_power){
                 mppt_step = 0; //Reset points if higher point detected, idea is to find highest point
+                mppt_peak_power = current_power;
             }
             mppt_step ++;
         }
@@ -449,11 +476,14 @@ void mppt_control(float current_power){
             mppt_peak_power = current_power; //set new maxpoint to current poin;
         }
     }
-    else{ //Going Downhill
-        adjust_PWM(-5);
-        if (mppt_step < MPPT_STEPS){
+    else{ //Going Downhi
+       // fprintf(&serial_port0, "Downhill CP:%.2f mppt:%.2f\n", current_power, mppt_peak_power);
+        adjust_PWM(-1);
+        if (mppt_step < mppt_steps[mppt_step_lookup] ){
             if (current_power > mppt_peak_power){
+              //  fprintf(&serial_port0, "highest power found\n");
                 mppt_step = 0;
+                mppt_peak_power = current_power;
             }
             mppt_step ++;
         }
@@ -469,7 +499,7 @@ int main (int argc, char *argv[])
 {
     _delay_ms(500);
     USART_Init(&serial_port0, 115200);
-    initCommonPorts();
+    //initCommonPorts();
     i2c_init();
     USART0_Flush();    
     initADC();
@@ -486,11 +516,7 @@ int main (int argc, char *argv[])
     TCCR2B = 0x07; //1= /1, 0x02 = /8, 0x03= /32, 0x04 =/64, 0x05= /128, 0x06 = /256, 0x07 = /1024
     
     //AVCC = 4.52V
-    
-    setPWM(1,0);
-    setPWM(2,0);
-    setPWM(3,0);
-    GTCCR = 0x00; 
+    //Init PWM and start counter, 0 will shutdown all 
     
     fprintf_P(&serial_port0, PSTR("AVCC Voltage:"));
     fprintf(&serial_port0, "%d",AVCC_VOLTAGE);
@@ -508,7 +534,7 @@ int main (int argc, char *argv[])
     //printf_P(&serial_port0, PSTR("i2c_init\n"));
     
     
-    MCP3424_SetConfig(1,18,1);
+   // MCP3424_SetConfig(1,18,1);
     
     //i2c_start(0xC0); // add Address bits on top off that
     //i2c_write(0x03); // set pointer to X axis MSB
@@ -517,23 +543,31 @@ int main (int argc, char *argv[])
     //Channel1 = VCC 5/1K jako => 5V/6K = 0.833V => 5V VCC
     //Channel2 = PANEL voltage 100K/1K jako => 
     //Channel4 = Panel Current 10K/10K jako => puolet jännitteestä. CH- kytketty VCC/2 => TODO korjaa kytkentä suoraan VIOUT=>CH4+
+
+    shutdownPWM(1);
+    shutdownPWM(2);
+    shutdownPWM(3);
+    _delay_ms(100);
     
-    
+    MCP3424_SetConfig(1,18,1);
     //Measure current sensor lowest voltage when no current flows through resistors
     int32_t curoffset = 0;
     fprintf(&serial_port0, "Calibrating current sensor zero-point...\n");
     MCP3424_SetConfig(4,18,1);
     for (uint8_t i=0; i< 50; i++){ //4111111
-                                   //330000
         int32_t zerovolt = measure();
-       // if (zerovolt > curoffset){
-        curoffset += zerovolt;   
-       // }
-        //fprintf(&serial_port0, "zerovolt: %ld\n",zerovolt);
+        curoffset += zerovolt;
+        fprintf(&serial_port0, "Offset%d: %ld\n", i, zerovolt);
     }
     curoffset /= 50;
     fprintf(&serial_port0, "Current sensor offset: %d\n",curoffset);
     
+    
+    initPWM(0,0,0);
+    setPWM(1,0);
+    setPWM(2,0);
+    setPWM(3,0);
+    GTCCR = 0x00; 
     
     /*fprintf(&serial_port0, "Calibrating CH3 ZEro volt...\n");
     MCP3424_SetConfig(3,18,1);
@@ -564,9 +598,9 @@ int main (int argc, char *argv[])
             command_received = 0;
         }
         //Start conversion (without ROM matching)
-		//ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 3 ), NULL );
-       // ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 4 ), NULL );
-       // ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 5 ), NULL );
+		ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 3 ), NULL );
+        ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 4 ), NULL );
+        ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 5 ), NULL );
 
 		//Delay (sensor needs time to perform conversion)
 		
@@ -588,10 +622,13 @@ int main (int argc, char *argv[])
         float measuredCurrent = (Current)/1.385; //4092000L/262143L*Voltage;
         
         power = measuredVoltage * (measuredCurrent/1000);
+        if (power < 0){
+            power = power * -1;
+        }
         //uint16_t pwm1 = (pwm&0xFF0000)>>16;
         //uint16_t pwm2 = ((pwm&0x00FF00)>>8);
         //uint16_t pwm3 = pwm&0xFF;
-        fprintf(&serial_port0, "Voltage:%.2fV Current:%.2fmA Power:%.2fW PWM1:%d PWM2:%d PWM3:%d\n",measuredVoltage, measuredCurrent, power, pwm_master);
+        fprintf(&serial_port0, "Volt:%.2fV Cur:%.2fmA PWR:%.2fW PWM:%d ",measuredVoltage, measuredCurrent, power, pwm_master);
         
         mppt_control(power);
         
@@ -627,7 +664,7 @@ int main (int argc, char *argv[])
         //if (ch > 4){
         //    ch = 1;   
         //}
-        /*
+        
         int16_t temp = 0;
         int16_t temp2 = 0;
         int16_t temp3 = 0;
@@ -643,8 +680,8 @@ int main (int argc, char *argv[])
         
         float temp_calc3 = temp3;
         temp_calc3 /= 20.0;
-       // fprintf(&serial_port0, "TEMP:%.2f TEMP2:%.2f TEMP3:%.2f\n",temp_calc, temp_calc2, temp_calc3);
-        */
+        fprintf(&serial_port0, "T1:%.2f T2:%.2f T3:%.2f\n",temp_calc, temp_calc2, temp_calc3);
+        
     }
     
     //Internal 1.1V => 1.0-1.2V 
@@ -705,7 +742,7 @@ int main (int argc, char *argv[])
     }
 }
 
-void initCommonPorts(void){
+//void initCommonPorts(void){
     //Init all led ports to input
     /*LED_DDR |= (1<<LED1_PIN_NUM);
     LED_DDR |= (1<<LED2_PIN_NUM);
@@ -732,7 +769,7 @@ void initCommonPorts(void){
     //For Button 1 need PCIE activation
     //PCICR |= (1<<PCIE2); //PCINT[23:16] //Activate any change interrupt on PCINT16-23
     //PCMSK2 |= (1<<PCINT20); //Enable only PCINT20 pin interrupts
-}
+//}
 
 void initTimer(void){
     TCCR2A |= (1<<WGM21); //CTC mode
@@ -787,7 +824,7 @@ void printMenu(void){
     fprintf(&serial_port0, "%d mV\n",AVCC_VOLTAGE);
 }
 
-/*
+
 void initPWM(uint8_t pwmvalue1, uint8_t pwmvalue2, uint8_t pwmvalue3){
     TCCR0A = (0xA0 + 0x03); //A + B channels FAST PWM, UPDATE OCR0 at TOP
     DDRB |= (1<<PB4);
@@ -808,74 +845,43 @@ void initPWM(uint8_t pwmvalue1, uint8_t pwmvalue2, uint8_t pwmvalue3){
     // 16.169V 1.67 Ohm
     // 9.682035928 A 100% duty cycle
     // 0.09765625 × 9.682035928 = 0.9455A 
-}*/
+}
 
 void setPWM(uint8_t channel, uint8_t pwm){
     if (channel == 1){
-        if (pwm == 0){
-            TCCR0A &= ~(1<<7); //Channel A disable
-            DDRB &= ~(1<<PB3);
-            PORTB &= ~(1<<PB3);
-            OCR0A = 0;
-        }
-        else{
-            TCCR0A |= (0x80 + 0x03);
-            OCR0A = pwm;
-            DDRB |= (1<<PB3);
-            PORTB &= ~(1<<PB3);
-            TCCR0B = 0x01; //Set 1 divider
-        }
+        OCR0A = pwm;
     }
     else if (channel == 2){
-        if (pwm == 0){
-            TCCR0A &= ~(1<<6); //Channel B disable
-            DDRB &= ~(1<<PB4);
-            PORTB &= ~(1<<PB4);
-            OCR0B = 0;
-        }
-        else{
-            TCCR0A |= (0x40 + 0x03);
-            DDRB |= (1<<PB4);
-            PORTB &= ~(1<<PB4); 
-            OCR0B = pwm;
-            TCCR0B = 0x01; //Set 1 divider
-        }
+        OCR0B = pwm;
     }
     else if (channel == 3){
-        if (pwm == 0){
-            TCCR1A &= ~(1<<7); //Channel B disable
-            DDRD &= ~(1<<PB5);
-            PORTD &= ~(1<<PB5);
-            OCR1AL = 0;  
-        }
-        else{
-            OCR1AL = pwm;
-            TCCR1A = (0x80 + 0x01); //A channel only, 8-bit mode
-            DDRD |= (1<<PD5);
-            PORTD &= ~(1<<PD5);
-            TCCR1B = 0x01 + 0x08; //Set 1 divider
-        }
+        OCR1AL = pwm;
+        OCR1AH = 0x00;
     }
 }
 
 void shutdownPWM(uint8_t channel){
     if (channel == 1){
         TCCR0A &= ~(1<<7); //Channel A disable
+        TCCR0B = 0x00;
         DDRB &= ~(1<<PB3);
         PORTB &= ~(1<<PB3);
         OCR0A = 0;
     }
     else if (channel == 2){
         TCCR0A &= ~(1<<6); //Channel B disable
+        TCCR0B = 0x00;
         DDRB &= ~(1<<PB4);
         PORTB &= ~(1<<PB4);
         OCR0B = 0;
     }
     else if (channel == 3){
         TCCR1A &= ~(1<<7); //Channel B disable
-        DDRD &= ~(1<<PB5);
-        PORTD &= ~(1<<PB5);
-        OCR1AL = 0;
+        TCCR1B = 0x00;
+        DDRD &= ~(1<<PD5);
+        PORTD &= ~(1<<PD5);
+        OCR1AL = 0x00
+        OCR1AH = 0x0;
     }
 }
 
