@@ -138,7 +138,6 @@ void printMenu(void);
 volatile uint8_t pwm_init_done = 0;
 volatile uint8_t command_received = 0;
 volatile float dac_set_value = 0.0f;
-volatile uint8_t ticktimer = 0;
 volatile uint8_t last_change = 0;
 volatile uint8_t dac_running = 1; //By default DAC is running
 
@@ -157,64 +156,37 @@ volatile uint8_t PWM_value = 0;
 
 volatile uint8_t button3_pressed = 0;
 
+//RTC incremented counter
+volatile uint8_t ticktimer = 0;
+volatile uint8_t ready_send = 0;
+
+#define ADCBITS 16 //Remember to adjust scaling functions 
+
 //####### Interrupt vectors #######
-/*ISR(USART_RX_vect) {
-    volatile char rchar = USART_Receive0();
+ISR(USART_RX_vect) {
+    uint8_t rchar = USART_Receive0();
+  /*  volatile char rchar = USART_Receive0();
     if (rchar == '\n' || rchar == '\r'){
        command_received = 1; 
     }
     else{
         buffer[ring_write++] = rchar;    
-    }
+    }*/
 }
 
-//Button3 Interrupt
-ISR(INT0_vect){    
-    if ((BUTTON_PIN & 0x04) == 0x00 && button3_pressed == 0){
-        if (dac_running > 0){ //DAC is running => Stop it
-            fprintf_P(&serial_port0, PSTR("DAC stopped\n"));
-            DISABLE_LED4
-            dac_running = 0;
-        }
-        else{ //Dac is not running, restore session
-            fprintf_P(&serial_port0, PSTR("restoring DAC to "));
-            fprintf(&serial_port0, "%.0fmv\n", dac_set_value);
-            ENABLE_LED4
-            dac_running = 1;    
-        }
-        button3_pressed    = 1;
-    }
-    else{
-        button3_pressed = 0;            
-    }
-}
-
-//Button2 Interrupt
-ISR(INT1_vect){
-    if ((BUTTON_PIN & 0x08) == 0){
-        ENABLE_LED2
-    }
-    else{
-        DISABLE_LED2    
-    }
-}
-
-//Button3 Interrupt
-ISR(PCINT2_vect){
-    if ((BUTTON_PIN & 0x10) == 0){
-        ENABLE_LED1
-    }
-    else{
-        DISABLE_LED1    
-    }
-}
 
 ////Tick timer interrupt
-ISR(TIMER2_COMPA_vect){
-    ticktimer ++;
-    last_change ++;
+//ISR(TIMER2_COMPA_vect){
+
+//Once per second timer
+ISR(TIMER2_OVF_vect){
+//fprintf_P(&serial_port0, PSTR("T2CA\n"));
+    //ticktimer ++;
+    //if (ticktimer > 125){
+    ready_send = 1;
+    //}
 }
-*/
+
 
 uint8_t mcp3424_address = 0xD0;
 uint8_t _resolution;
@@ -225,12 +197,13 @@ uint8_t _buffer[5] = {0,0,0,0,0};
 
 #define UP 1
 #define DOWN 2
-#define MPPT_STEPS_1 4
-#define MPPT_STEPS_2 8
-#define MPPT_STEPS_3 16
-#define MIN_PWM 10 //minimum pulse width max 256
+#define MPPT_STEPS_1 7
+#define MPPT_STEPS_2 10
+#define MPPT_STEPS_3 13 
+#define MPPT_STEPS_4 15
+#define MIN_PWM 2 //minimum pulse width max 256
 
-uint8_t mppt_steps[3] = {MPPT_STEPS_1, MPPT_STEPS_2, MPPT_STEPS_3};
+uint8_t mppt_steps[4] = {MPPT_STEPS_1, MPPT_STEPS_2, MPPT_STEPS_3, MPPT_STEPS_4};
 volatile int16_t pwm_master = 20;
 volatile uint8_t mppt_dir = UP;
 volatile uint8_t mppt_step = 0;
@@ -451,9 +424,12 @@ void adjust_PWM(int8_t amount){
 void mppt_control(float current_power){
     uint8_t mppt_step_lookup = 0;
     if (pwm_master >= 0xFF){
+        mppt_step_lookup = 3;
+    }
+    else if (pwm_master >= 100){
         mppt_step_lookup = 2;
     }
-    else if (pwm_master >= 0x40){
+    else if (pwm_master >= 20){
         mppt_step_lookup = 1;
     }
     else{
@@ -503,19 +479,8 @@ int main (int argc, char *argv[])
     i2c_init();
     USART0_Flush();    
     initADC();
-    //initTimer();
-    //
-    
-    //_delay_ms(2000);
-    //shutdownPWM(1);
-    //shutdownPWM(2);
-    //shutdownPWM(3);
-    
-    ASSR = 0x20; //Enable async mode Timer 2 Ext oscillator
-    TCNT2 = 0;
-    TCCR2B = 0x07; //1= /1, 0x02 = /8, 0x03= /32, 0x04 =/64, 0x05= /128, 0x06 = /256, 0x07 = /1024
-    
-    //AVCC = 4.52V
+    initTimer();
+    sei();  
     //Init PWM and start counter, 0 will shutdown all 
     
     fprintf_P(&serial_port0, PSTR("AVCC Voltage:"));
@@ -549,17 +514,35 @@ int main (int argc, char *argv[])
     shutdownPWM(3);
     _delay_ms(100);
     
-    MCP3424_SetConfig(1,18,1);
+
+
+    MCP3424_SetConfig(1, ADCBITS, 1);
     //Measure current sensor lowest voltage when no current flows through resistors
-    int32_t curoffset = 0;
+    int32_t curoffset = 99999;
     fprintf(&serial_port0, "Calibrating current sensor zero-point...\n");
-    MCP3424_SetConfig(4,18,1);
-    for (uint8_t i=0; i< 50; i++){ //4111111
+    MCP3424_SetConfig(4, ADCBITS, 1);
+    fprintf_P(&serial_port0, PSTR("Waiting 5 seconds before measurement\n"));
+    _delay_ms(5000);
+    fprintf_P(&serial_port0, PSTR("Taking 50 samples, then 50 to average\n"));
+    for (uint8_t i=0; i< 100; i++){ //4111111
         int32_t zerovolt = measure();
-        curoffset += zerovolt;
-        fprintf(&serial_port0, "Offset%d: %ld\n", i, zerovolt);
+        if (i > 49){
+            //curoffset += zerovolt;
+            fprintf(&serial_port0, "Offset%d: %ld\n", i, zerovolt);
+            if (curoffset > zerovolt){
+                curoffset = zerovolt;
+            }
+        }
     }
-    curoffset /= 50;
+    
+    /*if (curoffset > 1400){
+        curoffset = 1400; //well known value
+    }*/
+    if (curoffset*4 > (1400)){
+        curoffset = 1400/4;
+    }
+
+    //curoffset /= 50;
     fprintf(&serial_port0, "Current sensor offset: %d\n",curoffset);
     
     
@@ -574,64 +557,106 @@ int main (int argc, char *argv[])
     for (uint8_t i=0; i< 20; i++){
         fprintf(&serial_port0, "CH3 zerovolt: %ld\n",measure());
     }*/
+   /* 
+    for (uint8_t d = 0; d <32; d++){
+        MCP3424_SetConfig(2,18,1); //CHANNEL 2 = Panel Voltage meter 100/1 resistor divider
+        float measuredVoltage18 = (measure())/628.4f;
+         
+        MCP3424_SetConfig(2,16,1); //CHANNEL 2 = Panel Voltage meter 100/1 resistor divider
+        float measuredVoltage16 = (measure())/628.4f;
+
+        MCP3424_SetConfig(2,14,1); //CHANNEL 2 = Panel Voltage meter 100/1 resistor divider
+        float measuredVoltage14 = (measure())/628.4f;
+
+        fprintf(&serial_port0, "18bit:%.2f 16bit:%.2f 14bit:%.2f\n",measuredVoltage18, measuredVoltage16, measuredVoltage14);
+    }*/
     
-    
-    
-    //initPWM(0,0,0);
-    //shutdownPWM(1);
-    //shutdownPWM(3);
-    
-    uint8_t ch = 2;
-    uint16_t voltoffset = 3605;
+   // uint8_t ch = 2;
+   // uint16_t voltoffset = 3605;
     
     //MCP3424_SetConfig(ch,18,1);
 
-    uint8_t pwmstate = 1;
-    uint8_t round = 0;
-    uint8_t dir = 0;
-    float lastpower = 0;
+    float mosfet_temp1 = 0;
+    float mosfet_temp2 = 0;
+    float mosfet_temp3 = 0;
+    //uint8_t pwmstate = 1;
+    //uint8_t round = 0;
+    //uint8_t dir = 0;
+    //float lastpower = 0;
     float power = 0;
+    fprintf_P(&serial_port0, PSTR("READY\n"));
+    uint8_t tempmeasurement = 0;
+    
+    uint16_t kicker = 0; 
+    //sei(); //Start interrupts
+    //Convert temperatures initial
+    ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 3 ), NULL );
+    ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 4 ), NULL );
+    ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 5 ), NULL );
     while(1){
         //initPWM(pwm1, pwm2, pwm3);
-        if (command_received == 1){
+        /*if (command_received == 1){
             parseCommands();
             command_received = 0;
-        }
-        //Start conversion (without ROM matching)
-		ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 3 ), NULL );
-        ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 4 ), NULL );
-        ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 5 ), NULL );
-
+        }*/
+        
 		//Delay (sensor needs time to perform conversion)
-		
-        MCP3424_SetConfig(2,18,1); //CHANNEL 2 = Panel Voltage meter 100/1 resistor divider
-        float rawvolt = measure();
-        float Voltage = rawvolt;
-        //if (Voltage < 0.0){
-            //voltoffset = voltoffset + Voltage; //Add offset to current offset
-        //}
-        float measuredVoltage = (Voltage)/628.4f;
-        //fprintf(&serial_port0, "CH%d Sample:%d Voltage:%ld volt:%f TCNT2:%d\n",2, samples, Voltage, measured, TCNT2);
+	    	
+        MCP3424_SetConfig(2,ADCBITS,1); //CHANNEL 2 = Panel Voltage meter 100/1 resistor divider
+        float measuredVoltage = (measure())/628.4f*4.0f;
         
-        MCP3424_SetConfig(4,18,1);
+        MCP3424_SetConfig(4,ADCBITS,1);
         float Current = measure()-curoffset;
-       // Current = measure()-curoffset;
-        //if (Current < 0.0){
-            //curoffset = curoffset + Current; //Add offset to current offset
-        //}
-        float measuredCurrent = (Current)/1.385; //4092000L/262143L*Voltage;
         
+        float measuredCurrent = (Current)/1.555f*4.0f;   //1.385 this was 
         power = measuredVoltage * (measuredCurrent/1000);
+
         if (power < 0){
             power = power * -1;
         }
-        //uint16_t pwm1 = (pwm&0xFF0000)>>16;
-        //uint16_t pwm2 = ((pwm&0x00FF00)>>8);
-        //uint16_t pwm3 = pwm&0xFF;
-        fprintf(&serial_port0, "Volt:%.2fV Cur:%.2fmA PWR:%.2fW PWM:%d ",measuredVoltage, measuredCurrent, power, pwm_master);
-        
+        if (tempmeasurement > 20){
+            int16_t temp = 0;
+            int16_t temp2 = 0;
+            int16_t temp3 = 0;
+
+            ds18b20read( &PORTC, &DDRC, &PINC, ( 1 << 3 ), NULL, &temp );
+            ds18b20read( &PORTC, &DDRC, &PINC, ( 1 << 4 ), NULL, &temp2 );
+            ds18b20read( &PORTC, &DDRC, &PINC, ( 1 << 5 ), NULL, &temp3 );
+            mosfet_temp1 = temp;
+            mosfet_temp2 = temp3;
+            mosfet_temp3 = temp2;
+
+            //temperature must be divided by two and by default its 10x too much
+            mosfet_temp1 /= 20.0;
+            mosfet_temp2 /= 20.0;
+            mosfet_temp3 /= 20.0;
+            tempmeasurement = 0; //Reset counter
+
+            ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 3 ), NULL );
+            ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 4 ), NULL );
+            ds18b20convert( &PORTC, &DDRC, &PINC, ( 1 << 5 ), NULL );
+        }
+
+        //Send data once per second
+        if (ready_send == 1){
+        //    fprintf(&serial_port0, "READY SEND\N");
+            fprintf(&serial_port0, "S;"); //Send Set mark so this is recorded
+            ready_send = 0;
+        }
+
+        fprintf(&serial_port0, "%.2f;%.2f;%.2f;%d;",measuredVoltage, measuredCurrent, power, pwm_master);
+        fprintf(&serial_port0, "%.2f;%.2f;%.2f\n",mosfet_temp1, mosfet_temp2, mosfet_temp3);
+
         mppt_control(power);
         
+        if (kicker == 300){
+            adjust_PWM(25); //Kick panel so we dont get stuck 
+        }
+        else if (kicker > 600){
+            adjust_PWM(-25); //Kick down
+            kicker = 0;
+        }
+
         // 16.253V 1.67 Ohm 1A
         // VoltageRAW = 12448, Voltage 194350  => vähennetään offset 12448 - 3605 = 8843
         // CurrentRAW = 2280, Current 35650 => 2280 - 937 = 1343
@@ -664,24 +689,8 @@ int main (int argc, char *argv[])
         //if (ch > 4){
         //    ch = 1;   
         //}
-        
-        int16_t temp = 0;
-        int16_t temp2 = 0;
-        int16_t temp3 = 0;
-        //Read temperature (without ROM matching)
-        ds18b20read( &PORTC, &DDRC, &PINC, ( 1 << 3 ), NULL, &temp );
-        ds18b20read( &PORTC, &DDRC, &PINC, ( 1 << 4 ), NULL, &temp2 );
-        ds18b20read( &PORTC, &DDRC, &PINC, ( 1 << 5 ), NULL, &temp3 );
-        float temp_calc = temp;
-        temp_calc /= 20.0;
-        
-        float temp_calc2 = temp2;
-        temp_calc2 /= 20.0;
-        
-        float temp_calc3 = temp3;
-        temp_calc3 /= 20.0;
-        fprintf(&serial_port0, "T1:%.2f T2:%.2f T3:%.2f\n",temp_calc, temp_calc2, temp_calc3);
-        
+        tempmeasurement ++;
+        kicker ++;
     }
     
     //Internal 1.1V => 1.0-1.2V 
@@ -772,13 +781,15 @@ int main (int argc, char *argv[])
 //}
 
 void initTimer(void){
-    TCCR2A |= (1<<WGM21); //CTC mode
-    TCCR2B = 0x07; //1024 divider
-    OCR2A = 156; //100,1602Hz timer
+    ASSR = 0x20; //Enable async mode Timer 2 Ext oscillator
+    TCCR2A = 0x00; //Normal mode
+    //TCCR2A |= (1<<WGM21); //CTC mode
+    TCCR2B = 0x05; //128 divider => 32.768 clock => 1 per sec
+    //OCR2A = 125; //125Hz timer, this goes excatly 125 times 15625
     TCNT2 = 0; //Clear counter
     
     //Interrupt configuration, OCR2A Compare Match
-    TIMSK2 = 0x02; //Enable OCIEA
+    TIMSK2 = 0x01; //Enable Overflow interrupt enable
 }
 
 
@@ -866,22 +877,22 @@ void shutdownPWM(uint8_t channel){
         TCCR0B = 0x00;
         DDRB &= ~(1<<PB3);
         PORTB &= ~(1<<PB3);
-        OCR0A = 0;
+        OCR0A = 0x00;
     }
     else if (channel == 2){
         TCCR0A &= ~(1<<6); //Channel B disable
         TCCR0B = 0x00;
         DDRB &= ~(1<<PB4);
         PORTB &= ~(1<<PB4);
-        OCR0B = 0;
+        OCR0B = 0x00;
     }
     else if (channel == 3){
         TCCR1A &= ~(1<<7); //Channel B disable
         TCCR1B = 0x00;
         DDRD &= ~(1<<PD5);
         PORTD &= ~(1<<PD5);
-        OCR1AL = 0x00
-        OCR1AH = 0x0;
+        OCR1AL = 0x00;
+        OCR1AH = 0x00;
     }
 }
 
