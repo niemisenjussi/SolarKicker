@@ -132,7 +132,8 @@ uint8_t _buffer[5] = {0,0,0,0,0};
 #define MPPT_STEPS_2 8
 #define MPPT_STEPS_3 12 
 #define MPPT_STEPS_4 10
-#define MIN_PWM 2 //minimum pulse width max 256
+#define MIN_PWM 1 //minimum pulse width max 256
+#define MIN_PWM3 8 //minimum pwm3 channel value, this is 10 bit channel
 
 #define MPPT_LOW_VOLTAGE 74.0
 #define MPPT_HIGH_VOLTAGE 98.0
@@ -325,7 +326,7 @@ void adjust_PWM(int8_t amount){
     uint8_t pwm2 = 0;
     uint16_t pwm3 = 0;
     if ((pwm_master + amount) < 0){
-        pwm_master = 0;
+        pwm_master = 1;
     }
     else if ((pwm_master + amount) > (0x3FF+0xFF+0xFF)){//0x2FD){
         pwm_master = 0x3FF+0xFF+0xFF;//0x2FD;
@@ -354,6 +355,10 @@ void adjust_PWM(int8_t amount){
         pwm3 = pwm_master;
         pwm2 = 0x00;
         pwm1 = 0x00;
+        if (pwm3 < MIN_PWM3){
+            pwm3 = MIN_PWM3;
+            pwm_master = pwm3;
+        }
     }
     //fprintf(&serial_port0, "PWM1:%d, PWM2:%d, PWM3:%d\n", pwm1, pwm2, pwm3);
     setPWM(1, pwm1);
@@ -762,7 +767,7 @@ void initPWM(uint8_t pwmvalue1, uint8_t pwmvalue2, uint8_t pwmvalue3){
     PORTB &= ~(1<<PB4);
     DDRB |= (1<<PB3);
     PORTB &= ~(1<<PB3);
-    TCCR0B = 0x01; //1 divider    
+    TCCR0B = 0x02; //1=1 divider , 2=8 divider
     OCR0A = pwmvalue1;
     OCR0B = pwmvalue2;
     
@@ -787,14 +792,35 @@ void initPWM(uint8_t pwmvalue1, uint8_t pwmvalue2, uint8_t pwmvalue3){
 
 void setPWM(uint8_t channel, uint16_t pwm){
     if (channel == 1){
+        if (pwm == 0){
+            TCCR0A &= ~(1<<7); //Channel A disable
+            DDRB |= (1<<PB3); //Output
+            PORTB &= ~(1<<PB3); //Pull down
+            return;
+        }
+        TCCR0A |= (1<<7); //Enable Channel A
         uint8_t pwmval = pwm;
         OCR0A = pwmval;
     }
     else if (channel == 2){
+        if (pwm == 0){
+            TCCR0A &= ~(1<<5); //Channel B disable
+            DDRB |= (1<<PB4);
+            PORTB &= ~(1<<PB4);
+            return;
+        }
+        TCCR0A |= (1<<5);
         uint8_t pwmval = pwm;
         OCR0B = pwmval;
     }
     else if (channel == 3){
+        if (pwm == 0){
+            TCCR1A = 0x00;
+            DDRD |= (1<<PD5);
+            PORTD &= ~(1<<PD5);
+            return;
+        }
+        TCCR1A = (0x80 + 0x03);
         OCR1A = pwm;
        //OCR1AL = pwm;
        //OCR1AH = 0x00;
