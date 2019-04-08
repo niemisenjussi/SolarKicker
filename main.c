@@ -128,15 +128,15 @@ uint8_t _buffer[5] = {0,0,0,0,0};
 
 #define UP 1
 #define DOWN 2
-#define MPPT_STEPS_1 8
-#define MPPT_STEPS_2 8
-#define MPPT_STEPS_3 12 
-#define MPPT_STEPS_4 10
+#define MPPT_STEPS_1 9
+#define MPPT_STEPS_2 9
+#define MPPT_STEPS_3 11 
+#define MPPT_STEPS_4 9
 #define MIN_PWM 1 //minimum pulse width max 256
 #define MIN_PWM3 8 //minimum pwm3 channel value, this is 10 bit channel
 
-#define MPPT_LOW_VOLTAGE 74.0
-#define MPPT_HIGH_VOLTAGE 98.0
+#define MPPT_LOW_VOLTAGE 77.0
+#define MPPT_HIGH_VOLTAGE 95.0
 
 uint8_t mppt_steps[4] = {MPPT_STEPS_1, MPPT_STEPS_2, MPPT_STEPS_3, MPPT_STEPS_4};
 uint8_t mppt_kicker[4] = {15, 16, 20, 25};
@@ -391,31 +391,34 @@ void mppt_control(float current_power, float voltage){
 
     //Make sure we are inside MPPT tracking range before fine tuning
     if (voltage < MPPT_LOW_VOLTAGE){
-        if (voltage < MPPT_LOW_VOLTAGE - 20 && current_power > 60){
-            adjust_PWM(50);
+        if (voltage < MPPT_LOW_VOLTAGE - 20.0 && current_power > 60){
+            adjust_PWM(-90);
         }
-        else if (voltage < MPPT_LOW_VOLTAGE - 10 && current_power > 40){
-            adjust_PWM(-25);
+        else if (voltage < MPPT_LOW_VOLTAGE - 10.0 && current_power > 40){
+            adjust_PWM(-45);
         }
-        else if (voltage < MPPT_LOW_VOLTAGE - 5 && current_power > 20){
-            adjust_PWM(-10);
+        else if (voltage < MPPT_LOW_VOLTAGE - 5.0 && current_power > 20){
+            adjust_PWM(-15);
         }
         else{
-            adjust_PWM(-2);
+            adjust_PWM(-4);
         }
         mppt_dir = DOWN;
         mppt_step = 0;
         mppt_peak_power = current_power;
     }
     else if (voltage > MPPT_HIGH_VOLTAGE){
-        if (voltage > MPPT_HIGH_VOLTAGE + 10 && current_power > 40){ //Over 10volts over high limit
-            adjust_PWM(50);
+        if (voltage > MPPT_HIGH_VOLTAGE + 20.0 && current_power > 60){ //Over 10volts over high limit
+            adjust_PWM(90);
         }
-        else if (voltage < MPPT_HIGH_VOLTAGE + 5 && current_power > 20){
-            adjust_PWM(25);
+        else if (voltage > MPPT_HIGH_VOLTAGE + 10.0 && current_power > 40){ //Over 10volts over high limit
+            adjust_PWM(45);
+        }
+        else if (voltage < MPPT_HIGH_VOLTAGE + 5.0 && current_power > 20){
+            adjust_PWM(15);
         }
         else{
-            adjust_PWM(2);
+            adjust_PWM(4);
         }
         mppt_dir = UP;
         mppt_step = 0;
@@ -656,7 +659,7 @@ int main (int argc, char *argv[])
             }
         }
         else{
-            if (adjust_delay > 3){
+            if (adjust_delay > 0){ //Faster response. This was 3
                 mppt_control(power, measuredVoltage);
                 adjust_delay = 0;
             }
